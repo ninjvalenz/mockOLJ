@@ -774,3 +774,50 @@ INSERT INTO outbound_notifications (
     2, 3, 3,
     '2026-02-25 17:37:15', '2026-02-25 17:37:17', '2026-02-25 17:37:17'
 );
+
+-- -----------------------------------------------------------------------------
+-- WEBHOOK INBOX — v2.1: raw ingest buffer for OpenPhone SMS webhooks
+--
+-- Three representative states:
+--   WI-1: processed  — SMS-013 (Marcus garbage disposal), already mapped
+--   WI-2: unprocessed — Emily post-stay review SMS, arrived, not yet mapped
+--   WI-3: failed     — unknown caller inquiry, no matching guest, 2 attempts
+-- -----------------------------------------------------------------------------
+
+-- WI-1: processed — corresponds to SMS-013 (Marcus / garbage disposal)
+INSERT INTO webhook_inbox (
+    source, raw_payload, received_at,
+    status, attempts, last_attempted_at, processed_at,
+    processed_table, processed_row_id
+) VALUES (
+    'openphone',
+    '{"id":"SMS-013","phoneNumberId":"PN-001","userId":null,"from":"+13105554392","to":"+18185550001","text":"Quick heads up — the garbage disposal isn''t working. Not urgent.","status":"received","direction":"inbound","createdAt":"2026-02-07T14:20:00Z","conversationId":"CONV-MJ-002"}',
+    '2026-02-07 14:20:01',
+    'processed', 1, '2026-02-07 14:20:02', '2026-02-07 14:20:02',
+    'openphone_sms_messages',
+    (SELECT CAST(id AS TEXT) FROM openphone_sms_messages WHERE openphone_sms_id = 'SMS-013')
+);
+
+-- WI-2: unprocessed — Emily post-stay review text, just arrived
+INSERT INTO webhook_inbox (
+    source, raw_payload, received_at,
+    status, attempts
+) VALUES (
+    'openphone',
+    '{"id":"SMS-030","phoneNumberId":"PN-001","userId":null,"from":"+17145558834","to":"+18185550001","text":"Hi just wanted to say we had the most amazing stay! Left a 5-star review on Airbnb. Hope to book again soon!","status":"received","direction":"inbound","createdAt":"2026-02-26T10:15:00Z","conversationId":"CONV-ER-001"}',
+    '2026-02-26 10:15:01',
+    'unprocessed', 0
+);
+
+-- WI-3: failed — unknown number, no matching guest, 2 attempts
+INSERT INTO webhook_inbox (
+    source, raw_payload, received_at,
+    status, attempts, last_attempted_at,
+    error_message
+) VALUES (
+    'openphone',
+    '{"id":"SMS-031","phoneNumberId":"PN-001","userId":null,"from":"+19995551234","to":"+18185550001","text":"Hi, do you have availability for next weekend? Looking for something for 4 adults.","status":"received","direction":"inbound","createdAt":"2026-02-22T09:00:00Z","conversationId":"CONV-UNK-001"}',
+    '2026-02-22 09:00:02',
+    'failed', 2, '2026-02-22 09:05:00',
+    'No matching guest found for phone +19999551234. Cannot resolve guest_id. Manual review required.'
+);

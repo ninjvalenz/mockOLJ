@@ -333,3 +333,47 @@ WHERE strftime('%Y-%m', n.queued_at) = strftime('%Y-%m', 'now')
   AND n.initiated_by = 'system'
 GROUP BY n.platform, n.status
 ORDER BY n.platform, n.status;
+
+
+-- =============================================================================
+-- v2.1 QUERIES — Webhook Inbox (OpenPhone SMS ingest pipeline)
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- QUERY 11: "What's in the webhook inbox right now — what needs processing
+--            and what has failed?"
+--
+-- Shows the processing queue for the webhook receiver → SMS mapper pipeline.
+-- Unprocessed rows are pending first attempt; failed rows need retry or manual
+-- review. Processed rows shown for audit. Ordered: unprocessed first, then
+-- failed (retry candidates), then processed (audit trail).
+-- -----------------------------------------------------------------------------
+
+SELECT
+    wi.id,
+    wi.source,
+    wi.status,
+    wi.attempts,
+    wi.received_at,
+    wi.last_attempted_at,
+    -- For processed rows: show which final table row was created
+    wi.processed_table,
+    wi.processed_row_id,
+    -- For failed rows: show the error
+    wi.error_message,
+    -- Parse key fields out of the raw JSON for readability
+    json_extract(wi.raw_payload, '$.id')        AS webhook_sms_id,
+    json_extract(wi.raw_payload, '$.from')      AS from_number,
+    json_extract(wi.raw_payload, '$.direction') AS direction,
+    SUBSTR(
+        json_extract(wi.raw_payload, '$.text'), 1, 80
+    )                                           AS message_preview
+FROM webhook_inbox wi
+ORDER BY
+    CASE wi.status
+        WHEN 'unprocessed' THEN 1
+        WHEN 'failed'      THEN 2
+        WHEN 'processing'  THEN 3
+        WHEN 'processed'   THEN 4
+    END,
+    wi.received_at DESC;

@@ -8,16 +8,17 @@ A unified SQLite database that ingests data from **Hostaway**, **OpenPhone (Quo)
 
 | File | Description |
 |------|-------------|
-| `schema.sql` | Full v2 schema — SCD Type 2 dimensions, all tables, cascading FKs, views, indexes |
-| `seed_data.sql` | Realistic mock data across all platforms and new v2 tables |
+| `schema.sql` | Full v2.1 schema — SCD Type 2 dimensions, all tables (incl. `webhook_inbox`), cascading FKs, views, indexes |
+| `seed_data.sql` | Realistic mock data across all platforms and new v2.1 tables |
 | `migrate_v2.sql` | One-time migration script for upgrading an existing v1 `property_data.db` to v2 |
-| `example_queries.sql` | All 10 example queries, copy-paste ready for sqlite3 |
-| `property_data.db` | Ready-to-query SQLite database (migrated to v2, schema version = 2) |
+| `migrate_v2_1.sql` | Incremental migration for upgrading a v2 database to v2.1 — adds `webhook_inbox` |
+| `example_queries.sql` | All 11 example queries, copy-paste ready for sqlite3 |
+| `property_data.db` | Ready-to-query SQLite database (migrated to v2.1, schema version = 3) |
 | `run_queries.py` | Python script that builds a fresh DB from schema + seed and runs all queries |
 
 ---
 
-## Schema Diagram (v2)
+## Schema Diagram (v2.1)
 
 ```
 DATA FLOW
@@ -168,6 +169,26 @@ DATA FLOW
 └──────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
+│              WEBHOOK INBOX  (v2.1: OpenPhone ingest pipeline)        │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │                       webhook_inbox                           │  │
+│  │                                                               │  │
+│  │  Decouples fast acknowledgment from processing:               │  │
+│  │    1. Receiver validates signature → writes raw JSON here     │  │
+│  │    2. Processing job maps payload → openphone_sms_messages    │  │
+│  │    3. Failed rows tracked with error_message + attempts       │  │
+│  │                                                               │  │
+│  │  source       openphone | hostaway                            │  │
+│  │  raw_payload  full JSON blob as received                      │  │
+│  │  status       unprocessed → processing → processed | failed   │  │
+│  │  attempts     retry counter (incremented on each failure)     │  │
+│  │  processed_table + processed_row_id                           │  │
+│  │    → pointer to the final mapped row after success            │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────────┐
 │                              VIEWS                                   │
 │                                                                      │
 │  current_guests        → guests WHERE is_current = 1                │
@@ -214,6 +235,7 @@ DATA FLOW
 | `whatsapp_messages` | 5 | Emily reports issues → 2 automated replies → Emily confirms resolved |
 | `detected_triggers` | 5 | 4 resolved · 1 open (Mountain Cabin A keypad battery) |
 | `outbound_notifications` | 7 | 5 Discord alerts + 2 WhatsApp auto-replies, all delivered |
+| `webhook_inbox` | 3 | 1 processed (Marcus SMS-013) · 1 unprocessed (Emily post-stay) · 1 failed (unknown number) |
 
 ---
 
@@ -596,6 +618,42 @@ whatsapp  delivered  2              2                  maintenance_issue,checkin
 
 ---
 
+### Query 11 — Webhook inbox processing queue
+
+> *"What's in the webhook inbox right now — what needs processing and what has failed?"*
+
+Shows the state of Ja's ingest pipeline. Unprocessed rows need first-attempt mapping; failed rows have an `error_message` and retry counter; processed rows show which final-table row was created.
+
+```sql
+SELECT
+    wi.id, wi.source, wi.status, wi.attempts,
+    wi.received_at, wi.processed_table, wi.processed_row_id,
+    wi.error_message,
+    json_extract(wi.raw_payload, '$.id')        AS webhook_sms_id,
+    json_extract(wi.raw_payload, '$.from')      AS from_number,
+    SUBSTR(json_extract(wi.raw_payload, '$.text'), 1, 65) AS message_preview
+FROM webhook_inbox wi
+ORDER BY
+    CASE wi.status
+        WHEN 'unprocessed' THEN 1
+        WHEN 'failed'      THEN 2
+        WHEN 'processing'  THEN 3
+        WHEN 'processed'   THEN 4
+    END,
+    wi.received_at DESC;
+```
+
+**Results (3 rows):**
+```
+id  status       attempts  received_at          processed_table         processed_row_id  error_message                                                                 webhook_sms_id  from_number   message_preview
+--  -----------  --------  -------------------  ----------------------  ----------------  ----------------------------------------------------------------------------  --------------  ------------  -----------------------------------------------------------------
+2   unprocessed  0         2026-02-26 10:15:01                                                                                                                          SMS-030         +17145558834  Hi just wanted to say we had the most amazing stay! Left a 5-star
+3   failed       2         2026-02-22 09:00:02                                            No matching guest found for phone +19995551234. Cannot resolve guest_id.       SMS-031         +19995551234  Hi, do you have availability for next weekend? Looking for someth
+1   processed    1         2026-02-07 14:20:01  openphone_sms_messages  11                                                                                              SMS-013         +13105554392  Quick heads up — the garbage disposal isn't working. Not urgent.
+```
+
+---
+
 ## Design Decisions
 
 ### 1. Unified communications view as the AI query layer
@@ -635,7 +693,10 @@ A trigger can come from any of six inbound tables. Instead of six nullable FK co
 ### 8. Discord as property-level, not guest-level
 Discord is an internal ops channel. Messages link to a **property** (via `discord_channels.property_id`), not a guest. `reservation_id` is nullable for optional per-booking tagging.
 
-### 9. SQLite for the prototype
+### 9. Webhook inbox as a decoupling layer
+`webhook_inbox` separates receiving from processing. The receiver writes the raw JSON and returns HTTP 200 immediately — no guest lookups, no FK resolution, no risk of a slow DB write blocking the acknowledgment. A separate processing job reads `status='unprocessed'` rows, maps them to `openphone_sms_messages`, and updates `status`, `processed_table`, and `processed_row_id` on success. Failures set `status='failed'` and populate `error_message`, making them visible for retry or manual review without losing the original payload.
+
+### 10. SQLite for the prototype
 SQLite requires zero infrastructure and supports CTEs, views, partial indexes, and foreign key cascading — everything needed here. The schema is written to be largely portable to PostgreSQL if the system scales.
 
 ---
@@ -645,7 +706,6 @@ SQLite requires zero infrastructure and supports CTEs, views, partial indexes, a
 ### AI Tools Used
 Built using **Claude Code** (Anthropic's CLI, powered by Claude Sonnet 4.6). Claude designed the schema, wrote all SQL, fetched and interpreted the Hostaway and OpenPhone/Quo API docs directly, generated all mock data, ran and validated every query against the live database, and wrote this documentation — working interactively across multiple sessions.
 
-### How Long It Took
-Approximately **3 hours** across two sessions:
 - Session 1: v1 schema design (SCD Type 2, cascading FKs, views), mock data, 6 initial queries, documentation
 - Session 2: v2 expansion — API field research, bidirectional schema (WhatsApp, trigger detection, outbound notifications, voicemails, listings), migration script, updated seed data, 4 new queries, README
+- Session 3: v2.1 — `webhook_inbox` table for OpenPhone SMS ingest pipeline (raw buffer → processing job → `openphone_sms_messages`), migration script, seed data, Q11, README

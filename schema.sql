@@ -622,6 +622,41 @@ CREATE INDEX IF NOT EXISTS idx_notifications_platform   ON outbound_notification
 CREATE INDEX IF NOT EXISTS idx_notifications_queued_at  ON outbound_notifications(queued_at);
 
 -- =============================================================================
+-- WEBHOOK INBOX
+-- Raw ingest buffer for incoming webhook payloads before processing.
+-- Decouples fast acknowledgment (write raw JSON + return 200) from the slower
+-- mapping work that populates the final platform tables.
+--
+-- Flow:
+--   1. Receiver validates signature, writes raw_payload here (status=unprocessed)
+--   2. Processing job reads unprocessed/failed rows, maps to final table
+--      (e.g. openphone_sms_messages), sets status=processed + processed_row_id
+--   3. On mapping failure: status=failed, error_message populated, attempts++
+--   4. Retry logic reads failed rows where attempts < threshold
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS webhook_inbox (
+    id                  INTEGER  PRIMARY KEY AUTOINCREMENT,
+    source              TEXT     NOT NULL DEFAULT 'openphone'
+                                          CHECK(source IN ('openphone', 'hostaway')),
+    raw_payload         TEXT     NOT NULL,                   -- full JSON blob as received
+    received_at         DATETIME NOT NULL DEFAULT (datetime('now')),
+    status              TEXT     NOT NULL DEFAULT 'unprocessed'
+                                          CHECK(status IN (
+                                              'unprocessed', 'processing', 'processed', 'failed'
+                                          )),
+    attempts            INTEGER  NOT NULL DEFAULT 0,
+    last_attempted_at   DATETIME,
+    processed_at        DATETIME,
+    error_message       TEXT,                                -- populated when status='failed'
+    processed_table     TEXT,                                -- e.g. 'openphone_sms_messages'
+    processed_row_id    TEXT                                 -- PK of the final inserted row
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_status      ON webhook_inbox(status);
+CREATE INDEX IF NOT EXISTS idx_inbox_source      ON webhook_inbox(source);
+CREATE INDEX IF NOT EXISTS idx_inbox_received_at ON webhook_inbox(received_at);
+
+-- =============================================================================
 -- DIMENSION INDEXES
 -- =============================================================================
 CREATE INDEX IF NOT EXISTS idx_guests_guest_key         ON guests(guest_key);
