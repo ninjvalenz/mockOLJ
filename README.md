@@ -772,4 +772,4 @@ Built using **Claude Code** (Anthropic's CLI, powered by Claude Sonnet 4.6). Cla
 - Session 1: v1 schema design (SCD Type 2, cascading FKs, views), mock data, 6 initial queries, documentation
 - Session 2: v2 expansion — API field research, bidirectional schema (WhatsApp, trigger detection, outbound notifications, voicemails, listings), migration script, updated seed data, 4 new queries, README
 - Session 3: v2.1 — `webhook_inbox` table for OpenPhone SMS ingest pipeline (raw buffer → processing job → `openphone_sms_messages`), migration script, seed data, Q11, README
-- Session 4: v3 — schema alignment with Jan Marc's `hostaway-data-hub` (Phase 1 complete, all 19 Hostaway data categories). Added 19 new tables, `migrate_v3.sql`, production-readiness audit, README
+- Session 4: v3 — schema alignment with `hostaway-data-hub` (Phase 1 complete, all 19 Hostaway data categories). Added 19 new tables, `migrate_v3.sql`, production-readiness audit, README
