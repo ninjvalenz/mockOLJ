@@ -8,17 +8,18 @@ A unified SQLite database that ingests data from **Hostaway**, **OpenPhone (Quo)
 
 | File | Description |
 |------|-------------|
-| `schema.sql` | Full v2.1 schema — SCD Type 2 dimensions, all tables (incl. `webhook_inbox`), cascading FKs, views, indexes |
-| `seed_data.sql` | Realistic mock data across all platforms and new v2.1 tables |
-| `migrate_v2.sql` | One-time migration script for upgrading an existing v1 `property_data.db` to v2 |
-| `migrate_v2_1.sql` | Incremental migration for upgrading a v2 database to v2.1 — adds `webhook_inbox` |
+| `schema.sql` | Full v3 schema — 39 tables, 3 views, SCD Type 2 dimensions, cascading FKs, indexes |
+| `seed_data.sql` | Realistic mock data (covers v1/v2 tables; v3 Hostaway tables not yet seeded) |
+| `migrate_v2.sql` | One-time migration: v1 → v2 (already applied) |
+| `migrate_v2_1.sql` | One-time migration: v2 → v2.1 — adds `webhook_inbox` (already applied) |
+| `migrate_v3.sql` | One-time migration: v2/v2.1 → v3 — adds all 19 new Hostaway tables (already applied) |
 | `example_queries.sql` | All 11 example queries, copy-paste ready for sqlite3 |
-| `property_data.db` | Ready-to-query SQLite database (migrated to v2.1, schema version = 3) |
+| `property_data.db` | Ready-to-query SQLite database (v3, `PRAGMA user_version = 3`, 40 tables) |
 | `run_queries.py` | Python script that builds a fresh DB from schema + seed and runs all queries |
 
 ---
 
-## Schema Diagram (v2.1)
+## Schema Diagram (v3)
 
 ```
 DATA FLOW
@@ -71,6 +72,54 @@ DATA FLOW
 │    │     check-in windows       │   linked to properties by         │
 │    │     amenities_json         │   hostaway_property_id            │
 │    └────────────────────────────┘                                   │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│              HOSTAWAY EXTENDED DATA (v3 — Phase 1 complete)         │
+│              All 19 Hostaway data categories now captured           │
+│                                                                     │
+│  ┌─────────────────────┐  ┌──────────────────────────────────────┐  │
+│  │   hostaway_users    │  │  hostaway_groups                     │  │
+│  │   team members      │  │  ↓ hostaway_group_listings (jxn)    │  │
+│  │   role · is_active  │  │  portfolio groupings (many-to-many) │  │
+│  └─────────────────────┘  └──────────────────────────────────────┘  │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  hostaway_listing_units     multi-unit / connected listings  │   │
+│  │  hostaway_reviews           star ratings + per-category +    │   │
+│  │                             host reply                       │   │
+│  │  hostaway_coupon_codes      discount codes, validity windows │   │
+│  │  hostaway_custom_fields     user-defined field definitions   │   │
+│  │  hostaway_reference_data    amenities · bed types ·          │   │
+│  │                             property types · policies ·      │   │
+│  │                             countries · currencies           │   │
+│  │  hostaway_message_templates automated guest message          │   │
+│  │                             templates                        │   │
+│  │  hostaway_tasks             cleaning · maintenance ·         │   │
+│  │                             inspection tasks                 │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  PRICING & BILLING                                           │   │
+│  │  hostaway_seasonal_rules    date-range pricing overrides     │   │
+│  │  hostaway_tax_settings      per-listing + account-level tax  │   │
+│  │  hostaway_guest_charges     individual charges per booking   │   │
+│  │  hostaway_auto_charges      automatic charge trigger rules   │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  FINANCIALS                                                  │   │
+│  │  hostaway_financial_reports   per-reservation income detail  │   │
+│  │  hostaway_owner_statements    per-listing per-period rollup  │   │
+│  │  hostaway_expenses            property expense line items    │   │
+│  └──────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+│  ┌──────────────────────────────────────────────────────────────┐   │
+│  │  AVAILABILITY & CONFIG                                       │   │
+│  │  hostaway_calendar          per-date avail + price snapshot  │   │
+│  │                             UPSERT-safe (listing, date) key  │   │
+│  │  hostaway_webhook_configs   Hostaway outbound webhook setup  │   │
+│  └──────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -180,7 +229,9 @@ DATA FLOW
 │  │    3. Failed rows tracked with error_message + attempts       │  │
 │  │                                                               │  │
 │  │  source       openphone | hostaway                            │  │
-│  │  event_type   sms | call | voicemail                          │  │
+│  │  event_type   sms | call | voicemail (OpenPhone)               │
+│               reservation_created | reservation_updated |       │
+│               reservation_cancelled | new_message (Hostaway)    │  │
 │  │  raw_payload  full JSON blob as received                      │  │
 │  │  status       unprocessed → processing → processed | failed   │  │
 │  │  attempts     retry counter (incremented on each failure)     │  │
@@ -217,6 +268,8 @@ DATA FLOW
 
 ## Mock Data Overview
 
+**v1/v2 tables** are fully seeded. **v3 Hostaway tables** (reviews, tasks, financials, calendar, etc.) are schema-complete but not yet seeded — queued for the next session.
+
 | Table | Rows | Notes |
 |-------|------|-------|
 | `guests` | 5 | 4 guests · Sarah Chen has 2 SCD versions (email changed Feb 15) |
@@ -239,6 +292,7 @@ DATA FLOW
 | `detected_triggers` | 5 | 4 resolved · 1 open (Mountain Cabin A keypad battery) |
 | `outbound_notifications` | 7 | 5 Discord alerts + 2 WhatsApp auto-replies, all delivered |
 | `webhook_inbox` | 3 | 1 processed (Marcus SMS-013) · 1 unprocessed (Emily post-stay) · 1 failed (unknown number) |
+| v3 Hostaway tables (19) | 0 | Schema complete — seed data queued for next session |
 
 ---
 
@@ -681,8 +735,14 @@ Removing a parent automatically removes its dependents:
 
 Dimension FKs on `reservations` (`guest_id`, `property_id`) are `RESTRICT` — prevents orphaning reservation history when expiring SCD versions.
 
-### 4. hostaway_listings separate from the properties dimension
+### 4. Hostaway data in two layers: dimension vs. sync snapshot
 `properties` tracks business-level SCD history (address corrections, renames). `hostaway_listings` is a mutable API sync snapshot — full pricing, capacity, check-in windows, and policies refreshed on each sync. They cross-reference via `hostaway_property_id` but are not FK-linked, since listings are mutable and the dimension is append-only.
+
+The v3 Hostaway extended tables all hang off `hostaway_listings` via `hostaway_listing_id` (TEXT FK). This means every piece of operational Hostaway data — tasks, charges, calendar entries, seasonal rules, reviews — can be joined back to the listing snapshot, and from there to the `properties` dimension. Deletes cascade where appropriate (calendar, seasonal rules, auto-charges) and SET NULL where history should be preserved (reviews, financial reports, expenses).
+
+`hostaway_reference_data` uses a single generic lookup table keyed by `(category, hostaway_id)` rather than 12 separate tables — one per API reference endpoint. This keeps the schema flat for data that's read-only and rarely queried by joins.
+
+`hostaway_groups` uses a proper junction table (`hostaway_group_listings`) rather than a JSON array. This makes "which listings are in this group" and "which groups does this listing belong to" standard SQL joins rather than JSON parsing.
 
 ### 5. Bidirectional tracking: detected_triggers + outbound_notifications
 `detected_triggers` is the LLM's event log — every inbound message analyzed and found actionable gets a row here, with `llm_reasoning`, `llm_model`, and `llm_confidence` preserved. `outbound_notifications` is the send log — every alert or message pushed back out, with delivery status from the destination platform. The FK between them makes the full chain queryable: *what was detected → what did we do → was it delivered.*
@@ -712,3 +772,4 @@ Built using **Claude Code** (Anthropic's CLI, powered by Claude Sonnet 4.6). Cla
 - Session 1: v1 schema design (SCD Type 2, cascading FKs, views), mock data, 6 initial queries, documentation
 - Session 2: v2 expansion — API field research, bidirectional schema (WhatsApp, trigger detection, outbound notifications, voicemails, listings), migration script, updated seed data, 4 new queries, README
 - Session 3: v2.1 — `webhook_inbox` table for OpenPhone SMS ingest pipeline (raw buffer → processing job → `openphone_sms_messages`), migration script, seed data, Q11, README
+- Session 4: v3 — schema alignment with Jan Marc's `hostaway-data-hub` (Phase 1 complete, all 19 Hostaway data categories). Added 19 new tables, `migrate_v3.sql`, production-readiness audit, README
