@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Centralized Property Management MCP Database
--- Schema v2: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
+-- Schema v3: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
 --            + LLM Trigger Detection · Outbound Notification Tracking
 --
 -- Data flows:
@@ -55,6 +55,27 @@
 --   · unified_communications view updated to include WhatsApp
 --   · open_triggers view (new)
 --   · notification_log view (new)
+--
+-- v3 additions (Phase 1 complete — all 19 Hostaway data categories):
+--   · hostaway_users (team members — housekeepers, managers, etc.)
+--   · hostaway_groups + hostaway_group_listings (named property groups / portfolios)
+--   · hostaway_listing_units (multi-unit / connected listings)
+--   · hostaway_reviews (guest ratings + per-category scores + host replies)
+--   · hostaway_coupon_codes (discount codes with validity windows)
+--   · hostaway_custom_fields (user-defined field definitions)
+--   · hostaway_reference_data (amenities, bed types, property types, policies, etc.)
+--   · hostaway_message_templates (saved automated message templates)
+--   · hostaway_tasks (cleaning, maintenance, inspection tasks)
+--   · hostaway_seasonal_rules (date-range pricing overrides)
+--   · hostaway_tax_settings (per-listing + account-level taxes)
+--   · hostaway_guest_charges (per-reservation payment charges)
+--   · hostaway_auto_charges (automatic charge rules per listing)
+--   · hostaway_financial_reports (per-reservation income breakdown)
+--   · hostaway_owner_statements (per-listing per-period financial rollup)
+--   · hostaway_expenses (property expenses, optionally tied to reservations)
+--   · hostaway_calendar (per-date availability + pricing snapshot per listing)
+--   · hostaway_webhook_configs (Hostaway configured webhook endpoints)
+--   · webhook_inbox: event_type expanded to include Hostaway reservation events
 -- =============================================================================
 
 PRAGMA foreign_keys = ON;
@@ -263,6 +284,411 @@ CREATE TABLE IF NOT EXISTS hostaway_messages (
     sent_at         DATETIME NOT NULL,
     inserted_on     DATETIME,                           -- v2: Hostaway insertedOn
     updated_at      DATETIME                            -- v2: Hostaway updatedOn
+);
+
+-- =============================================================================
+-- HOSTAWAY: Reviews  (v3)
+-- Guest star ratings and written reviews with optional host reply.
+-- category_ratings_json holds per-category scores (cleanliness, communication, etc.)
+-- reviewer_name is stored PII-scrubbed per Jan Marc's privacy layer.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_reviews (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_review_id      TEXT     UNIQUE,
+    reservation_id          INTEGER
+                                REFERENCES reservations(id)
+                                ON DELETE SET NULL,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    overall_rating          REAL     CHECK(overall_rating BETWEEN 1 AND 5),
+    category_ratings_json   TEXT,    -- {"cleanliness": 5, "communication": 4, "location": 5, ...}
+    review_content          TEXT,    -- guest review body
+    host_reply              TEXT,    -- host public response
+    reviewer_name           TEXT,    -- PII-scrubbed (no raw names stored)
+    submitted_at            DATETIME,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_listing_id   ON hostaway_reviews(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_reviews_submitted_at ON hostaway_reviews(submitted_at);
+
+-- =============================================================================
+-- HOSTAWAY: Coupon Codes  (v3)
+-- Discount codes applicable to one specific listing or all listings (NULL).
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_coupon_codes (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_coupon_id      TEXT     UNIQUE,
+    code                    TEXT     NOT NULL,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,             -- NULL = applies to all listings
+    discount_type           TEXT     CHECK(discount_type IN ('percent', 'fixed')),
+    discount_value          REAL,                               -- dollar amount if type='fixed'
+    discount_percent        REAL,                               -- 0–100 if type='percent'
+    max_uses                INTEGER,                            -- NULL = unlimited
+    times_used              INTEGER  NOT NULL DEFAULT 0,
+    valid_from              DATE,
+    valid_to                DATE,
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_coupons_code      ON hostaway_coupon_codes(code);
+CREATE INDEX IF NOT EXISTS idx_coupons_is_active ON hostaway_coupon_codes(is_active);
+
+-- =============================================================================
+-- HOSTAWAY: Custom Fields  (v3)
+-- User-defined fields that extend the standard Hostaway data model.
+-- options_json holds allowed values for 'select' type fields.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_custom_fields (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_field_id       TEXT     UNIQUE,
+    name                    TEXT     NOT NULL,
+    field_type              TEXT,    -- 'text', 'number', 'date', 'boolean', 'select'
+    description             TEXT,
+    is_required             INTEGER  CHECK(is_required IN (0, 1)),
+    default_value           TEXT,
+    options_json            TEXT,    -- JSON array of allowed values (select fields only)
+    applies_to              TEXT     CHECK(applies_to IN ('listing', 'reservation', 'guest')),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at              DATETIME
+);
+
+-- =============================================================================
+-- HOSTAWAY: Users (Team Members)  (v3)
+-- Internal team — housekeepers, managers, maintenance staff, owners.
+-- Email stored PII-scrubbed per Jan Marc's privacy layer.
+-- Referenced by hostaway_tasks.assigned_user_id.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_users (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_user_id        TEXT     UNIQUE NOT NULL,
+    first_name              TEXT,
+    last_name               TEXT,
+    email                   TEXT,    -- stored redacted (PII scrubbed)
+    role                    TEXT,    -- 'admin', 'owner', 'cleaner', 'maintenance', etc.
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
+-- HOSTAWAY: Property Groups  (v3)
+-- Named bundles of listings (e.g. "Beach Portfolio", "Mountain Cabins").
+-- listing_ids_json is a JSON array of hostaway_listing_id values.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_groups (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_group_id       TEXT     UNIQUE NOT NULL,
+    name                    TEXT     NOT NULL,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Junction table: which listings belong to which group (many-to-many)
+CREATE TABLE IF NOT EXISTS hostaway_group_listings (
+    group_id            INTEGER  NOT NULL
+                                    REFERENCES hostaway_groups(id)
+                                    ON DELETE CASCADE,
+    hostaway_listing_id TEXT     NOT NULL
+                                    REFERENCES hostaway_listings(hostaway_listing_id)
+                                    ON DELETE CASCADE,
+    PRIMARY KEY (group_id, hostaway_listing_id)
+);
+
+-- =============================================================================
+-- HOSTAWAY: Listing Units (Multi-Unit / Connected Listings)  (v3)
+-- Individual bookable units within a parent listing.
+-- Cascade: listing delete → unit delete.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_listing_units (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_unit_id        TEXT     UNIQUE NOT NULL,
+    hostaway_listing_id     TEXT     NOT NULL
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE CASCADE,
+    name                    TEXT,
+    unit_number             TEXT,
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_listing_units_listing ON hostaway_listing_units(hostaway_listing_id);
+
+-- =============================================================================
+-- HOSTAWAY: Guest Payment Charges  (v3)
+-- Individual charge events against a reservation (damage deposits, extras, etc.).
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_guest_charges (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_charge_id      TEXT     UNIQUE,
+    reservation_id          INTEGER
+                                REFERENCES reservations(id)
+                                ON DELETE SET NULL,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    amount                  REAL     NOT NULL,
+    currency                TEXT     NOT NULL DEFAULT 'USD',
+    status                  TEXT     CHECK(status IN (
+                                'pending', 'authorized', 'captured',
+                                'voided', 'refunded', 'failed'
+                            )),
+    charge_type             TEXT,    -- 'damage_deposit', 'extra_guest', 'cleaning', 'other'
+    description             TEXT,
+    payment_method          TEXT,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_guest_charges_reservation ON hostaway_guest_charges(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_guest_charges_status      ON hostaway_guest_charges(status);
+
+-- =============================================================================
+-- HOSTAWAY: Auto-Charge Rules  (v3)
+-- Rules that trigger automatic charges on reservations.
+-- e.g. charge 30% on booking, charge remainder 7 days before check-in.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_auto_charges (
+    id                          INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_auto_charge_id     TEXT     UNIQUE,
+    hostaway_listing_id         TEXT
+                                    REFERENCES hostaway_listings(hostaway_listing_id)
+                                    ON DELETE CASCADE,
+    amount                      REAL     NOT NULL,
+    currency                    TEXT     NOT NULL DEFAULT 'USD',
+    trigger                     TEXT,    -- 'on_booking', 'before_checkin', 'after_checkout', etc.
+    days_offset                 INTEGER, -- days before/after trigger event (negative = before)
+    is_active                   INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at                  DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_auto_charges_listing ON hostaway_auto_charges(hostaway_listing_id);
+
+-- =============================================================================
+-- HOSTAWAY: Seasonal Pricing Rules  (v3)
+-- Date-range overrides for nightly pricing and stay constraints per listing.
+-- date_ranges_json: [{"start": "2025-06-01", "end": "2025-08-31"}, ...]
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_seasonal_rules (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_rule_id        TEXT     UNIQUE,
+    name                    TEXT,
+    hostaway_listing_id     TEXT     NOT NULL
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE CASCADE,
+    date_ranges_json        TEXT,    -- JSON array of {start, end} date range objects
+    nightly_price           REAL,
+    min_nights              INTEGER,
+    max_nights              INTEGER,
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_seasonal_rules_listing ON hostaway_seasonal_rules(hostaway_listing_id);
+
+-- =============================================================================
+-- HOSTAWAY: Tax Settings  (v3)
+-- Per-listing tax configuration synced from Hostaway.
+-- hostaway_listing_id = NULL means account-level default taxes.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_tax_settings (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE CASCADE,              -- NULL = account-level default
+    tax_name                TEXT,
+    tax_type                TEXT     CHECK(tax_type IN ('percent', 'fixed', 'per_night')),
+    tax_value               REAL,
+    applies_to              TEXT,    -- 'base_rate', 'total', 'cleaning_fee', etc.
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_tax_settings_listing ON hostaway_tax_settings(hostaway_listing_id);
+
+-- =============================================================================
+-- HOSTAWAY: Message Templates  (v3)
+-- Saved templates for automated guest communications.
+-- trigger: the Hostaway automation event that fires this template.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_message_templates (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_template_id    TEXT     UNIQUE,
+    name                    TEXT     NOT NULL,
+    subject                 TEXT,
+    body                    TEXT     NOT NULL,
+    trigger                 TEXT,    -- 'reservation_confirmed', 'checkin_day', 'checkout', etc.
+    channel                 TEXT     CHECK(channel IN ('email', 'sms', 'hostaway', 'all')),
+    language                TEXT     NOT NULL DEFAULT 'en',
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =============================================================================
+-- HOSTAWAY: Tasks  (v3)
+-- Housekeeping, maintenance, and inspection tasks.
+-- Linked to listings; optionally to reservations and assigned team members.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_tasks (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_task_id        TEXT     UNIQUE,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    reservation_id          INTEGER
+                                REFERENCES reservations(id)
+                                ON DELETE SET NULL,
+    assigned_user_id        TEXT
+                                REFERENCES hostaway_users(hostaway_user_id)
+                                ON DELETE SET NULL,
+    task_type               TEXT,    -- 'cleaning', 'maintenance', 'inspection', 'other'
+    status                  TEXT     CHECK(status IN (
+                                'pending', 'in_progress', 'completed', 'cancelled'
+                            )),
+    title                   TEXT     NOT NULL,
+    description             TEXT,
+    due_date                DATE,
+    completed_at            DATETIME,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at              DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_listing     ON hostaway_tasks(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status      ON hostaway_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON hostaway_tasks(due_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_reservation ON hostaway_tasks(reservation_id);
+
+-- =============================================================================
+-- HOSTAWAY: Owner Statements  (v3)
+-- Monthly/period financial summaries sent to property owners.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_owner_statements (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_statement_id   TEXT     UNIQUE,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    period_start            DATE     NOT NULL,
+    period_end              DATE     NOT NULL,
+    total_income            REAL,
+    total_expenses          REAL,
+    net_income              REAL,
+    status                  TEXT,    -- 'draft', 'sent', 'approved'
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_owner_statements_listing ON hostaway_owner_statements(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_owner_statements_period  ON hostaway_owner_statements(period_start);
+
+-- =============================================================================
+-- HOSTAWAY: Expenses  (v3)
+-- Property expenses (maintenance, supplies, utilities, etc.).
+-- Optionally tied to a specific reservation (e.g. damage repair).
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_expenses (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_expense_id     TEXT     UNIQUE,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    reservation_id          INTEGER
+                                REFERENCES reservations(id)
+                                ON DELETE SET NULL,
+    category                TEXT,    -- 'maintenance', 'supplies', 'utilities', 'other'
+    amount                  REAL     NOT NULL,
+    currency                TEXT     NOT NULL DEFAULT 'USD',
+    description             TEXT,
+    expense_date            DATE,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_expenses_listing      ON hostaway_expenses(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_expense_date ON hostaway_expenses(expense_date);
+
+-- =============================================================================
+-- HOSTAWAY: Financial Reports  (v3)
+-- Per-reservation income breakdown from /v1/finance/report/reservations.
+-- Complements hostaway_owner_statements (period rollup) with line-item detail.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_financial_reports (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_report_id      TEXT     UNIQUE,
+    reservation_id          INTEGER
+                                REFERENCES reservations(id)
+                                ON DELETE SET NULL,
+    hostaway_listing_id     TEXT
+                                REFERENCES hostaway_listings(hostaway_listing_id)
+                                ON DELETE SET NULL,
+    channel                 TEXT,                    -- airbnb, vrbo, direct, etc.
+    check_in                DATE,
+    check_out               DATE,
+    accommodation_fare      REAL,
+    cleaning_fee            REAL,
+    platform_commission     REAL,
+    net_income              REAL,
+    currency                TEXT     NOT NULL DEFAULT 'USD',
+    report_date             DATE,
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_financial_reports_listing     ON hostaway_financial_reports(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_financial_reports_reservation ON hostaway_financial_reports(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_financial_reports_date        ON hostaway_financial_reports(report_date);
+
+-- =============================================================================
+-- HOSTAWAY: Calendar  (v3)
+-- Per-date availability and pricing snapshot per listing, refreshed on each sync.
+-- UPSERT-safe: unique constraint on (hostaway_listing_id, date).
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_calendar (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_listing_id     TEXT     NOT NULL
+                                        REFERENCES hostaway_listings(hostaway_listing_id)
+                                        ON DELETE CASCADE,
+    date                    DATE     NOT NULL,
+    is_available            INTEGER  NOT NULL DEFAULT 1 CHECK(is_available IN (0, 1)),
+    price                   REAL,
+    min_nights              INTEGER,
+    notes                   TEXT,
+    last_synced_at          DATETIME,
+    UNIQUE (hostaway_listing_id, date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_calendar_listing ON hostaway_calendar(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_date    ON hostaway_calendar(date);
+
+-- =============================================================================
+-- HOSTAWAY: Reference Data  (v3)
+-- Generic lookup table for all Hostaway reference endpoints.
+-- category values: 'amenity' | 'bed_type' | 'property_type' |
+--   'cancellation_policy' | 'country' | 'currency' | 'timezone' | 'language'
+-- metadata_json holds any extra fields (ISO codes, policy text, etc.)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_reference_data (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    category                TEXT     NOT NULL,
+    hostaway_id             TEXT,    -- Hostaway's ID for this item (if applicable)
+    name                    TEXT     NOT NULL,
+    metadata_json           TEXT,
+    last_synced_at          DATETIME,
+    UNIQUE(category, hostaway_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_reference_data_category ON hostaway_reference_data(category);
+
+-- =============================================================================
+-- HOSTAWAY: Webhook Configurations  (v3)
+-- The webhook endpoints configured in Hostaway (i.e. where Hostaway posts events).
+-- Distinct from webhook_inbox, which is the inbound raw event buffer.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS hostaway_webhook_configs (
+    id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
+    hostaway_webhook_id     TEXT     UNIQUE,
+    url                     TEXT,    -- endpoint Hostaway posts to
+    events_json             TEXT,    -- JSON array of subscribed event types
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- =============================================================================
@@ -639,7 +1065,13 @@ CREATE TABLE IF NOT EXISTS webhook_inbox (
     source              TEXT     NOT NULL DEFAULT 'openphone'
                                           CHECK(source IN ('openphone', 'hostaway')),
     event_type          TEXT     NOT NULL DEFAULT 'sms'
-                                          CHECK(event_type IN ('sms', 'call', 'voicemail')),
+                                          -- OpenPhone: sms, call, voicemail
+                                          -- Hostaway: reservation_created, reservation_updated, reservation_cancelled, new_message
+                                          CHECK(event_type IN (
+                                              'sms', 'call', 'voicemail',
+                                              'reservation_created', 'reservation_updated',
+                                              'reservation_cancelled', 'new_message'
+                                          )),
     raw_payload         TEXT     NOT NULL,                   -- full JSON blob as received
     received_at         DATETIME NOT NULL DEFAULT (datetime('now')),
     status              TEXT     NOT NULL DEFAULT 'unprocessed'
