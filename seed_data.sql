@@ -821,3 +821,333 @@ INSERT INTO webhook_inbox (
     'failed', 2, '2026-02-22 09:05:00',
     'No matching guest found for phone +19999551234. Cannot resolve guest_id. Manual review required.'
 );
+
+-- =============================================================================
+-- v3 SEED DATA — Hostaway Phase 1 tables
+-- Reference date: 2026-02-24
+--
+-- All 19 v3 tables seeded:
+--   hostaway_users, hostaway_groups, hostaway_group_listings,
+--   hostaway_listing_units, hostaway_reviews, hostaway_coupon_codes,
+--   hostaway_custom_fields, hostaway_reference_data,
+--   hostaway_message_templates, hostaway_tasks, hostaway_seasonal_rules,
+--   hostaway_tax_settings, hostaway_guest_charges, hostaway_auto_charges,
+--   hostaway_financial_reports, hostaway_owner_statements, hostaway_expenses,
+--   hostaway_calendar, hostaway_webhook_configs
+-- =============================================================================
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY USERS (team members)
+-- Emails stored PII-scrubbed per Jan Marc's privacy layer.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_users (hostaway_user_id, first_name, last_name, email, role, is_active)
+VALUES
+    ('HU-001', 'Noah',   'Santos',    '[REDACTED]', 'admin',        1),
+    ('HU-002', 'Maria',  'Gutierrez', '[REDACTED]', 'housekeeper',  1),
+    ('HU-003', 'Carlos', 'Reyes',     '[REDACTED]', 'maintenance',  1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY GROUPS (property portfolios)
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_groups (hostaway_group_id, name, is_active)
+VALUES
+    ('HG-001', 'Beach Portfolio',    1),
+    ('HG-002', 'Mountain Portfolio', 1);
+
+-- Junction: listings per group
+INSERT INTO hostaway_group_listings (group_id, hostaway_listing_id)
+VALUES
+    ((SELECT id FROM hostaway_groups WHERE hostaway_group_id = 'HG-001'), 'HA-002'),
+    ((SELECT id FROM hostaway_groups WHERE hostaway_group_id = 'HG-002'), 'HA-001'),
+    ((SELECT id FROM hostaway_groups WHERE hostaway_group_id = 'HG-002'), 'HA-003');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY LISTING UNITS
+-- Beach House 1 has a main house + detached guest studio.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_listing_units (hostaway_unit_id, hostaway_listing_id, name, unit_number, is_active)
+VALUES
+    ('HU-L002-A', 'HA-002', 'Main House',   '1A', 1),
+    ('HU-L002-B', 'HA-002', 'Guest Studio', '1B', 1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY REVIEWS
+-- Covering R-1001 (Marcus, Beach House 1, checked_out) and
+-- R-1004 (David, Beach House 1, checked_out).
+-- Reviewer names PII-scrubbed.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_reviews (
+    hostaway_review_id, reservation_id, hostaway_listing_id,
+    overall_rating, category_ratings_json,
+    review_content, host_reply, reviewer_name, submitted_at
+) VALUES
+    ('HR-001',
+     1, 'HA-002',
+     5.0,
+     '{"cleanliness":5,"communication":5,"location":5,"accuracy":5,"value":4}',
+     'Incredible beach house! The ocean view from the deck made every morning magical. Host was super responsive when we had a question about parking.',
+     'Thank you so much! We loved hosting you and your group. Come back anytime!',
+     '[REDACTED]',
+     '2026-02-09 11:00:00'),
+
+    ('HR-002',
+     4, 'HA-002',
+     4.0,
+     '{"cleanliness":4,"communication":5,"location":5,"accuracy":4,"value":4}',
+     'Great location right on the coast. Beach access was amazing. Hot tub was a nice bonus. Would book again.',
+     'Glad you enjoyed the beach access! Hope to have you back.',
+     '[REDACTED]',
+     '2026-01-17 09:30:00');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY COUPON CODES
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_coupon_codes (
+    hostaway_coupon_id, code, hostaway_listing_id,
+    discount_type, discount_percent, max_uses, times_used,
+    valid_from, valid_to, is_active
+) VALUES
+    -- 10% off any listing, unlimited, all 2026
+    ('HC-001', 'WELCOME10', NULL,
+     'percent', 10.0, NULL, 3,
+     '2026-01-01', '2026-12-31', 1),
+
+    -- $50 fixed off Beach House 1, summer 2026, 5-use cap
+    ('HC-002', 'BEACH50', 'HA-002',
+     'fixed', 50.0, 5, 1,
+     '2026-06-01', '2026-08-31', 1);
+
+-- discount_value for HC-002 (fixed $50):
+UPDATE hostaway_coupon_codes SET discount_value = 50.0 WHERE hostaway_coupon_id = 'HC-002';
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY CUSTOM FIELDS
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_custom_fields (
+    hostaway_field_id, name, field_type, description,
+    is_required, applies_to, is_active
+) VALUES
+    ('HF-001', 'Gate Code',        'text',    'Shared gate access code for the community', 0, 'listing',      1),
+    ('HF-002', 'Pet Deposit Paid', 'boolean', 'Whether the pet damage deposit was collected', 0, 'reservation', 1),
+    ('HF-003', 'Guest Source',     'select',  'How the guest first heard about our properties', 0, 'guest',    1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY REFERENCE DATA (amenities, bed types, property types)
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_reference_data (category, hostaway_id, name, last_synced_at)
+VALUES
+    ('amenity',             'AM-001', 'WiFi',             '2026-02-22 00:00:00'),
+    ('amenity',             'AM-002', 'Hot Tub',          '2026-02-22 00:00:00'),
+    ('amenity',             'AM-003', 'BBQ Grill',        '2026-02-22 00:00:00'),
+    ('amenity',             'AM-004', 'Free Parking',     '2026-02-22 00:00:00'),
+    ('amenity',             'AM-005', 'Pet Friendly',     '2026-02-22 00:00:00'),
+    ('bed_type',            'BT-001', 'King',             '2026-02-22 00:00:00'),
+    ('bed_type',            'BT-002', 'Queen',            '2026-02-22 00:00:00'),
+    ('bed_type',            'BT-003', 'Twin',             '2026-02-22 00:00:00'),
+    ('property_type',       'PT-001', 'House',            '2026-02-22 00:00:00'),
+    ('property_type',       'PT-002', 'Cabin',            '2026-02-22 00:00:00'),
+    ('cancellation_policy', 'CP-001', 'Moderate',         '2026-02-22 00:00:00'),
+    ('cancellation_policy', 'CP-002', 'Strict',           '2026-02-22 00:00:00');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY MESSAGE TEMPLATES
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_message_templates (
+    hostaway_template_id, name, subject, body,
+    trigger, channel, language, is_active
+) VALUES
+    ('HMT-001',
+     'Booking Confirmation',
+     'Your reservation is confirmed!',
+     'Hi {{guest_first_name}}, your booking at {{listing_name}} from {{check_in}} to {{check_out}} is confirmed. We look forward to hosting you!',
+     'reservation_confirmed', 'email', 'en', 1),
+
+    ('HMT-002',
+     'Check-In Instructions',
+     'Your check-in details for tomorrow',
+     'Hi {{guest_first_name}}, tomorrow is the day! Check-in is between {{check_in_start}} and {{check_in_end}}. Door code: {{door_code}}. WiFi: {{wifi_name}} / {{wifi_password}}. Enjoy your stay!',
+     'check_in_instructions', 'email', 'en', 1),
+
+    ('HMT-003',
+     'Checkout Reminder',
+     'Checkout reminder — see you next time!',
+     'Hi {{guest_first_name}}, just a reminder that checkout is tomorrow at {{check_out_time}}. Please leave the key in the lockbox. We hope you had a wonderful stay!',
+     'checkout', 'sms', 'en', 1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY TASKS
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_tasks (
+    hostaway_task_id, hostaway_listing_id, reservation_id,
+    assigned_user_id, task_type, status, title, description,
+    due_date, completed_at
+) VALUES
+    -- Post-checkout cleaning after R-1001 (Marcus, Beach House 1, checked out Feb 8)
+    ('HT-001', 'HA-002', 1,
+     'HU-002', 'cleaning', 'completed',
+     'Post-checkout clean — Beach House 1',
+     'Full turnover after R-1001. Check hot tub chemicals, replace towels/linens, restock welcome kit.',
+     '2026-02-08', '2026-02-08 14:30:00'),
+
+    -- Maintenance: keypad battery Mountain Cabin A (from DT-5)
+    ('HT-002', 'HA-003', NULL,
+     'HU-003', 'maintenance', 'pending',
+     'Replace front door keypad battery — Mountain Cabin A',
+     'Guest R-1002 reported keypad intermittent (needed 5 attempts). Replace 9V battery before next arrival.',
+     '2026-02-27', NULL),
+
+    -- Pre-arrival inspection Cottage 3 for R-1003 (Sarah, check-in Mar 5)
+    ('HT-003', 'HA-001', 3,
+     'HU-002', 'inspection', 'pending',
+     'Pre-arrival inspection — Cottage 3',
+     'Full walk-through before Sarah Chen arrival Mar 5. Verify hot tub temp, test appliances, confirm welcome kit stocked.',
+     '2026-03-04', NULL);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY SEASONAL PRICING RULES
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_seasonal_rules (
+    hostaway_rule_id, name, hostaway_listing_id,
+    date_ranges_json, nightly_price, min_nights, is_active
+) VALUES
+    ('HSR-001', 'Summer Premium', 'HA-002',
+     '[{"start":"2026-06-01","end":"2026-08-31"}]',
+     299.00, 4, 1),
+
+    ('HSR-002', 'Ski Season Peak', 'HA-003',
+     '[{"start":"2025-12-15","end":"2026-03-15"}]',
+     245.00, 3, 1),
+
+    ('HSR-003', 'Holiday Week', 'HA-001',
+     '[{"start":"2026-12-24","end":"2027-01-01"}]',
+     280.00, 5, 1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY TAX SETTINGS
+-- NULL hostaway_listing_id = account-level default (applies to all listings)
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_tax_settings (
+    hostaway_listing_id, tax_name, tax_type, tax_value, applies_to, is_active
+) VALUES
+    (NULL,     'CA State Transient Occupancy Tax', 'percent', 10.0, 'total', 1),
+    (NULL,     'Local Tourism Assessment',          'percent',  1.5, 'total', 1),
+    ('HA-002', 'Malibu City TOT',                  'percent',  2.0, 'total', 1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY GUEST CHARGES
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_guest_charges (
+    hostaway_charge_id, reservation_id, hostaway_listing_id,
+    amount, currency, status, charge_type, description, payment_method
+) VALUES
+    -- Damage deposit for Marcus (R-1001) — pre-authorized, voided after clean checkout
+    ('HGC-001', 1, 'HA-002',
+     500.00, 'USD', 'voided',
+     'damage_deposit', 'Standard damage deposit — pre-authorized, voided after clean checkout.', 'card'),
+
+    -- Pet fee for Marcus (R-1001, brought a dog)
+    ('HGC-002', 1, 'HA-002',
+     75.00, 'USD', 'captured',
+     'extra_guest', 'Pet fee — 1 dog.', 'card');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY AUTO-CHARGE RULES
+-- amount stores the fraction (0.30 = 30% of total_price); app layer resolves.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_auto_charges (
+    hostaway_auto_charge_id, hostaway_listing_id,
+    amount, currency, trigger, days_offset, is_active
+) VALUES
+    ('HAC-001', 'HA-002', 0.30, 'USD', 'on_booking',     0,  1),
+    ('HAC-002', 'HA-002', 0.70, 'USD', 'before_checkin', -7, 1),
+    ('HAC-003', 'HA-003', 1.00, 'USD', 'on_booking',     0,  1);
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY FINANCIAL REPORTS
+-- Per-reservation income breakdown for the two checked-out reservations.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_financial_reports (
+    hostaway_report_id, reservation_id, hostaway_listing_id,
+    channel, check_in, check_out,
+    accommodation_fare, cleaning_fee, platform_commission, net_income,
+    currency, report_date
+) VALUES
+    ('HFR-001', 1, 'HA-002',
+     'airbnb', '2026-02-01', '2026-02-08',
+     1295.00, 150.00, 95.00, 1350.00, 'USD', '2026-02-09'),
+
+    ('HFR-002', 4, 'HA-002',
+     'airbnb', '2026-01-10', '2026-01-15',
+     880.00, 150.00, 70.00, 960.00,   'USD', '2026-01-16');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY OWNER STATEMENTS
+-- Monthly income rollup for Beach House 1 (most active listing).
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_owner_statements (
+    hostaway_statement_id, hostaway_listing_id,
+    period_start, period_end,
+    total_income, total_expenses, net_income, status
+) VALUES
+    ('HOS-001', 'HA-002', '2026-01-01', '2026-01-31',  960.00,  75.00,  885.00, 'sent'),
+    ('HOS-002', 'HA-002', '2026-02-01', '2026-02-28', 1350.00, 125.00, 1225.00, 'draft');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY EXPENSES
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_expenses (
+    hostaway_expense_id, hostaway_listing_id, reservation_id,
+    category, amount, currency, description, expense_date
+) VALUES
+    -- Hot tub pool tech dispatch, Cottage 3, Feb 3 (triggered by DT-2)
+    ('HE-001', 'HA-001', NULL,
+     'maintenance', 125.00, 'USD',
+     'Emergency pool tech dispatch — hot tub thermostat adjustment.', '2026-02-03'),
+
+    -- Supplies restock Beach House 1 after Marcus checkout
+    ('HE-002', 'HA-002', 1,
+     'supplies', 48.50, 'USD',
+     'Welcome kit restock: toiletries, coffee pods, laundry pods, paper goods.', '2026-02-08'),
+
+    -- Monthly Starlink for Mountain Cabin A
+    ('HE-003', 'HA-003', NULL,
+     'utilities', 89.99, 'USD',
+     'Monthly Starlink subscription — Mountain Cabin A.', '2026-02-01');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY CALENDAR
+-- Two weeks of dates for Cottage 3 (HA-001).
+-- R-1003 (Sarah Chen) is blocked Mar 5–9 (check-in Mar 5, check-out Mar 10).
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_calendar (
+    hostaway_listing_id, date, is_available, price, min_nights, last_synced_at
+) VALUES
+    ('HA-001', '2026-02-28', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-01', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-02', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-03', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-04', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    -- R-1003 blocked
+    ('HA-001', '2026-03-05', 0, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-06', 0, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-07', 0, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-08', 0, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-09', 0, 200.00, 2, '2026-02-24 06:00:00'),
+    -- Available after checkout
+    ('HA-001', '2026-03-10', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-11', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-12', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-13', 1, 200.00, 2, '2026-02-24 06:00:00'),
+    ('HA-001', '2026-03-14', 1, 200.00, 2, '2026-02-24 06:00:00');
+
+-- -----------------------------------------------------------------------------
+-- HOSTAWAY WEBHOOK CONFIGS
+-- The endpoint configured in Hostaway to POST reservation + message events.
+-- -----------------------------------------------------------------------------
+INSERT INTO hostaway_webhook_configs (
+    hostaway_webhook_id, url, events_json, is_active
+) VALUES
+    ('HWC-001',
+     'https://mcp.internal/webhooks/hostaway',
+     '["reservation_created","reservation_updated","reservation_cancelled","new_message"]',
+     1);
