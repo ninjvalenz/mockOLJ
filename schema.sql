@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Centralized Property Management MCP Database
--- Schema v3: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
+-- Schema v4: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
 --            + LLM Trigger Detection · Outbound Notification Tracking
 --
 -- Data flows:
@@ -79,6 +79,7 @@
 -- =============================================================================
 
 PRAGMA foreign_keys = ON;
+PRAGMA journal_mode  = WAL;     -- enable WAL for concurrent readers + single writer
 
 -- =============================================================================
 -- DIMENSION: GUESTS  (SCD Type 2)
@@ -324,7 +325,7 @@ CREATE TABLE IF NOT EXISTS hostaway_coupon_codes (
     hostaway_listing_id     TEXT
                                 REFERENCES hostaway_listings(hostaway_listing_id)
                                 ON DELETE SET NULL,             -- NULL = applies to all listings
-    discount_type           TEXT     CHECK(discount_type IN ('percent', 'fixed')),
+    discount_type           TEXT     NOT NULL CHECK(discount_type IN ('percent', 'fixed')),
     discount_value          REAL,                               -- dollar amount if type='fixed'
     discount_percent        REAL,                               -- 0–100 if type='percent'
     max_uses                INTEGER,                            -- NULL = unlimited
@@ -332,11 +333,13 @@ CREATE TABLE IF NOT EXISTS hostaway_coupon_codes (
     valid_from              DATE,
     valid_to                DATE,
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_coupons_code      ON hostaway_coupon_codes(code);
 CREATE INDEX IF NOT EXISTS idx_coupons_is_active ON hostaway_coupon_codes(is_active);
+CREATE INDEX IF NOT EXISTS idx_coupons_listing   ON hostaway_coupon_codes(hostaway_listing_id);
 
 -- =============================================================================
 -- HOSTAWAY: Custom Fields  (v3)
@@ -347,15 +350,20 @@ CREATE TABLE IF NOT EXISTS hostaway_custom_fields (
     id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
     hostaway_field_id       TEXT     UNIQUE,
     name                    TEXT     NOT NULL,
-    field_type              TEXT,    -- 'text', 'number', 'date', 'boolean', 'select'
+    field_type              TEXT     CHECK(field_type IN ('text', 'number', 'date', 'boolean', 'select')),
     description             TEXT,
-    is_required             INTEGER  CHECK(is_required IN (0, 1)),
+    is_required             INTEGER  NOT NULL DEFAULT 0 CHECK(is_required IN (0, 1)),
     default_value           TEXT,
     options_json            TEXT,    -- JSON array of allowed values (select fields only)
     applies_to              TEXT     CHECK(applies_to IN ('listing', 'reservation', 'guest')),
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at              DATETIME
 );
+
+CREATE INDEX IF NOT EXISTS idx_custom_fields_applies_to ON hostaway_custom_fields(applies_to);
+CREATE INDEX IF NOT EXISTS idx_custom_fields_is_active  ON hostaway_custom_fields(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Users (Team Members)  (v3)
@@ -369,8 +377,12 @@ CREATE TABLE IF NOT EXISTS hostaway_users (
     first_name              TEXT,
     last_name               TEXT,
     email                   TEXT,    -- stored redacted (PII scrubbed)
-    role                    TEXT,    -- 'admin', 'owner', 'cleaner', 'maintenance', etc.
+    role                    TEXT     CHECK(role IN (
+                                'admin', 'owner', 'cleaner',
+                                'maintenance', 'housekeeper', 'property_manager'
+                            )),
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -383,6 +395,8 @@ CREATE TABLE IF NOT EXISTS hostaway_groups (
     id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
     hostaway_group_id       TEXT     UNIQUE NOT NULL,
     name                    TEXT     NOT NULL,
+    is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -396,6 +410,8 @@ CREATE TABLE IF NOT EXISTS hostaway_group_listings (
                                     ON DELETE CASCADE,
     PRIMARY KEY (group_id, hostaway_listing_id)
 );
+
+CREATE INDEX IF NOT EXISTS idx_groups_is_active ON hostaway_groups(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Listing Units (Multi-Unit / Connected Listings)  (v3)
@@ -411,6 +427,7 @@ CREATE TABLE IF NOT EXISTS hostaway_listing_units (
     name                    TEXT,
     unit_number             TEXT,
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -431,11 +448,14 @@ CREATE TABLE IF NOT EXISTS hostaway_guest_charges (
                                 ON DELETE SET NULL,
     amount                  REAL     NOT NULL,
     currency                TEXT     NOT NULL DEFAULT 'USD',
-    status                  TEXT     CHECK(status IN (
+    status                  TEXT     NOT NULL DEFAULT 'pending'
+                                     CHECK(status IN (
                                 'pending', 'authorized', 'captured',
                                 'voided', 'refunded', 'failed'
                             )),
-    charge_type             TEXT,    -- 'damage_deposit', 'extra_guest', 'cleaning', 'other'
+    charge_type             TEXT     NOT NULL CHECK(charge_type IN (
+                                'damage_deposit', 'extra_guest', 'cleaning', 'other'
+                            )),
     description             TEXT,
     payment_method          TEXT,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -443,6 +463,7 @@ CREATE TABLE IF NOT EXISTS hostaway_guest_charges (
 
 CREATE INDEX IF NOT EXISTS idx_guest_charges_reservation ON hostaway_guest_charges(reservation_id);
 CREATE INDEX IF NOT EXISTS idx_guest_charges_status      ON hostaway_guest_charges(status);
+CREATE INDEX IF NOT EXISTS idx_guest_charges_listing     ON hostaway_guest_charges(hostaway_listing_id);
 
 -- =============================================================================
 -- HOSTAWAY: Auto-Charge Rules  (v3)
@@ -457,13 +478,18 @@ CREATE TABLE IF NOT EXISTS hostaway_auto_charges (
                                     ON DELETE CASCADE,
     amount                      REAL     NOT NULL,
     currency                    TEXT     NOT NULL DEFAULT 'USD',
-    trigger                     TEXT,    -- 'on_booking', 'before_checkin', 'after_checkout', etc.
+    trigger                     TEXT     NOT NULL CHECK(trigger IN (
+                                    'on_booking', 'before_checkin', 'after_checkout',
+                                    'on_checkin', 'immediate'
+                                )),
     days_offset                 INTEGER, -- days before/after trigger event (negative = before)
     is_active                   INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at                  DATETIME,
     created_at                  DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_auto_charges_listing ON hostaway_auto_charges(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_auto_charges_listing   ON hostaway_auto_charges(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_auto_charges_is_active ON hostaway_auto_charges(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Seasonal Pricing Rules  (v3)
@@ -482,10 +508,12 @@ CREATE TABLE IF NOT EXISTS hostaway_seasonal_rules (
     min_nights              INTEGER,
     max_nights              INTEGER,
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_seasonal_rules_listing ON hostaway_seasonal_rules(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_seasonal_rules_listing   ON hostaway_seasonal_rules(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_seasonal_rules_is_active ON hostaway_seasonal_rules(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Tax Settings  (v3)
@@ -500,12 +528,16 @@ CREATE TABLE IF NOT EXISTS hostaway_tax_settings (
     tax_name                TEXT,
     tax_type                TEXT     CHECK(tax_type IN ('percent', 'fixed', 'per_night')),
     tax_value               REAL,
-    applies_to              TEXT,    -- 'base_rate', 'total', 'cleaning_fee', etc.
+    applies_to              TEXT     CHECK(applies_to IN (
+                                'base_rate', 'total', 'cleaning_fee', 'nightly_rate'
+                            )),
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_tax_settings_listing ON hostaway_tax_settings(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_tax_settings_listing   ON hostaway_tax_settings(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_tax_settings_is_active ON hostaway_tax_settings(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Message Templates  (v3)
@@ -518,12 +550,18 @@ CREATE TABLE IF NOT EXISTS hostaway_message_templates (
     name                    TEXT     NOT NULL,
     subject                 TEXT,
     body                    TEXT     NOT NULL,
-    trigger                 TEXT,    -- 'reservation_confirmed', 'checkin_day', 'checkout', etc.
+    trigger                 TEXT     CHECK(trigger IN (
+                                'reservation_confirmed', 'checkin_day', 'checkout',
+                                'guest_arrival', 'check_in_instructions', 'reminder', 'other'
+                            )),
     channel                 TEXT     CHECK(channel IN ('email', 'sms', 'hostaway', 'all')),
     language                TEXT     NOT NULL DEFAULT 'en',
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_msg_templates_is_active ON hostaway_message_templates(is_active);
 
 -- =============================================================================
 -- HOSTAWAY: Tasks  (v3)
@@ -542,8 +580,11 @@ CREATE TABLE IF NOT EXISTS hostaway_tasks (
     assigned_user_id        TEXT
                                 REFERENCES hostaway_users(hostaway_user_id)
                                 ON DELETE SET NULL,
-    task_type               TEXT,    -- 'cleaning', 'maintenance', 'inspection', 'other'
-    status                  TEXT     CHECK(status IN (
+    task_type               TEXT     NOT NULL CHECK(task_type IN (
+                                'cleaning', 'maintenance', 'inspection', 'other'
+                            )),
+    status                  TEXT     NOT NULL DEFAULT 'pending'
+                                     CHECK(status IN (
                                 'pending', 'in_progress', 'completed', 'cancelled'
                             )),
     title                   TEXT     NOT NULL,
@@ -554,10 +595,11 @@ CREATE TABLE IF NOT EXISTS hostaway_tasks (
     updated_at              DATETIME
 );
 
-CREATE INDEX IF NOT EXISTS idx_tasks_listing     ON hostaway_tasks(hostaway_listing_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status      ON hostaway_tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_due_date    ON hostaway_tasks(due_date);
-CREATE INDEX IF NOT EXISTS idx_tasks_reservation ON hostaway_tasks(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_listing      ON hostaway_tasks(hostaway_listing_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_status       ON hostaway_tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_due_date     ON hostaway_tasks(due_date);
+CREATE INDEX IF NOT EXISTS idx_tasks_reservation  ON hostaway_tasks(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_assigned_user ON hostaway_tasks(assigned_user_id);
 
 -- =============================================================================
 -- HOSTAWAY: Owner Statements  (v3)
@@ -574,7 +616,8 @@ CREATE TABLE IF NOT EXISTS hostaway_owner_statements (
     total_income            REAL,
     total_expenses          REAL,
     net_income              REAL,
-    status                  TEXT,    -- 'draft', 'sent', 'approved'
+    status                  TEXT     NOT NULL DEFAULT 'draft'
+                                     CHECK(status IN ('draft', 'sent', 'approved')),
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -595,7 +638,10 @@ CREATE TABLE IF NOT EXISTS hostaway_expenses (
     reservation_id          INTEGER
                                 REFERENCES reservations(id)
                                 ON DELETE SET NULL,
-    category                TEXT,    -- 'maintenance', 'supplies', 'utilities', 'other'
+    category                TEXT     NOT NULL CHECK(category IN (
+                                'maintenance', 'supplies', 'utilities',
+                                'labor', 'marketing', 'other'
+                            )),
     amount                  REAL     NOT NULL,
     currency                TEXT     NOT NULL DEFAULT 'USD',
     description             TEXT,
@@ -605,6 +651,8 @@ CREATE TABLE IF NOT EXISTS hostaway_expenses (
 
 CREATE INDEX IF NOT EXISTS idx_expenses_listing      ON hostaway_expenses(hostaway_listing_id);
 CREATE INDEX IF NOT EXISTS idx_expenses_expense_date ON hostaway_expenses(expense_date);
+CREATE INDEX IF NOT EXISTS idx_expenses_reservation  ON hostaway_expenses(reservation_id);
+CREATE INDEX IF NOT EXISTS idx_expenses_category     ON hostaway_expenses(category);
 
 -- =============================================================================
 -- HOSTAWAY: Financial Reports  (v3)
@@ -684,12 +732,15 @@ CREATE INDEX IF NOT EXISTS idx_reference_data_category ON hostaway_reference_dat
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS hostaway_webhook_configs (
     id                      INTEGER  PRIMARY KEY AUTOINCREMENT,
-    hostaway_webhook_id     TEXT     UNIQUE,
-    url                     TEXT,    -- endpoint Hostaway posts to
+    hostaway_webhook_id     TEXT     UNIQUE NOT NULL,
+    url                     TEXT     NOT NULL,   -- endpoint Hostaway posts to
     events_json             TEXT,    -- JSON array of subscribed event types
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
+    deleted_at              DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE INDEX IF NOT EXISTS idx_webhook_configs_is_active ON hostaway_webhook_configs(is_active);
 
 -- =============================================================================
 -- OPENPHONE (Quo): Phone Numbers
@@ -747,10 +798,11 @@ CREATE TABLE IF NOT EXISTS openphone_calls (
     updated_at                  DATETIME
 );
 
-CREATE INDEX IF NOT EXISTS idx_calls_guest_id    ON openphone_calls(guest_id);
-CREATE INDEX IF NOT EXISTS idx_calls_started_at  ON openphone_calls(started_at);
-CREATE INDEX IF NOT EXISTS idx_calls_status      ON openphone_calls(status);
-CREATE INDEX IF NOT EXISTS idx_calls_direction   ON openphone_calls(direction);
+CREATE INDEX IF NOT EXISTS idx_calls_guest_id      ON openphone_calls(guest_id);
+CREATE INDEX IF NOT EXISTS idx_calls_started_at    ON openphone_calls(started_at);
+CREATE INDEX IF NOT EXISTS idx_calls_status        ON openphone_calls(status);
+CREATE INDEX IF NOT EXISTS idx_calls_direction     ON openphone_calls(direction);
+CREATE INDEX IF NOT EXISTS idx_calls_phone_number  ON openphone_calls(openphone_phone_number_id);
 
 -- =============================================================================
 -- OPENPHONE: Call Transcripts
@@ -793,7 +845,8 @@ CREATE TABLE IF NOT EXISTS openphone_voicemails (
                                     REFERENCES openphone_calls(id)
                                     ON DELETE CASCADE
                                     ON UPDATE CASCADE,
-    voicemail_status    TEXT     CHECK(voicemail_status IN (
+    voicemail_status    TEXT     NOT NULL DEFAULT 'pending'
+                                 CHECK(voicemail_status IN (
                                     'pending', 'completed', 'failed', 'absent'
                                 )),
     transcript          TEXT,                           -- auto-transcribed voicemail text
@@ -828,9 +881,10 @@ CREATE TABLE IF NOT EXISTS openphone_sms_messages (
     updated_at                  DATETIME                -- v2: last status update timestamp
 );
 
-CREATE INDEX IF NOT EXISTS idx_sms_guest_id    ON openphone_sms_messages(guest_id);
-CREATE INDEX IF NOT EXISTS idx_sms_sent_at     ON openphone_sms_messages(sent_at);
-CREATE INDEX IF NOT EXISTS idx_sms_direction   ON openphone_sms_messages(direction);
+CREATE INDEX IF NOT EXISTS idx_sms_guest_id      ON openphone_sms_messages(guest_id);
+CREATE INDEX IF NOT EXISTS idx_sms_sent_at       ON openphone_sms_messages(sent_at);
+CREATE INDEX IF NOT EXISTS idx_sms_direction     ON openphone_sms_messages(direction);
+CREATE INDEX IF NOT EXISTS idx_sms_phone_number  ON openphone_sms_messages(openphone_phone_number_id);
 
 -- =============================================================================
 -- GMAIL: Threads & Emails (unchanged from v1)
@@ -1273,3 +1327,8 @@ CREATE VIEW IF NOT EXISTS notification_log AS
     LEFT JOIN properties p          ON n.property_id   = p.id
     LEFT JOIN current_properties cp ON p.property_key  = cp.property_key
     ORDER BY n.queued_at DESC;
+
+-- =============================================================================
+-- SCHEMA VERSION
+-- =============================================================================
+PRAGMA user_version = 4;
