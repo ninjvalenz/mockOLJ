@@ -40,6 +40,11 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Build dev.db
         shell: bash
         env:
@@ -62,8 +67,8 @@ jobs:
       - name: Generate ER diagram
         run: |
           sudo apt-get update
-          sudo apt-get install -y graphviz
-          python -m pip install --upgrade pip
+          sudo apt-get install -y graphviz libgraphviz-dev pkg-config python3-dev build-essential
+          python -m pip install --upgrade pip setuptools wheel
           pip install eralchemy2
           eralchemy2 -i sqlite:///dev.db -o site/erd.svg
 
@@ -110,6 +115,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
