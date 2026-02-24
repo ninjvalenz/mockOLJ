@@ -8,18 +8,60 @@ A unified SQLite database that ingests data from **Hostaway**, **OpenPhone (Quo)
 
 | File | Description |
 |------|-------------|
-| `schema.sql` | Full v3 schema — 39 tables, 3 views, SCD Type 2 dimensions, cascading FKs, indexes |
-| `seed_data.sql` | Realistic mock data (covers v1/v2 tables; v3 Hostaway tables not yet seeded) |
+| `schema.sql` | Full v4 schema — 40 tables, 3 views, WAL mode, NOT NULL/CHECK constraints, soft-delete fields, all indexes |
+| `seed_data.sql` | Realistic mock data — all 40 tables seeded (v1/v2/v3 Hostaway tables fully covered) |
 | `migrate_v2.sql` | One-time migration: v1 → v2 (already applied) |
 | `migrate_v2_1.sql` | One-time migration: v2 → v2.1 — adds `webhook_inbox` (already applied) |
 | `migrate_v3.sql` | One-time migration: v2/v2.1 → v3 — adds all 19 new Hostaway tables (already applied) |
+| `migrate_v4.sql` | One-time migration: v3 → v4 — production-readiness fixes: WAL, CHECK constraints, NOT NULL, indexes, soft-delete (apply to live DB) |
 | `example_queries.sql` | All 11 example queries, copy-paste ready for sqlite3 |
-| `property_data.db` | Ready-to-query SQLite database (v3, `PRAGMA user_version = 3`, 40 tables) |
+| `property_data.db` | SQLite database (v3, `PRAGMA user_version = 3`) — run `migrate_v4.sql` to upgrade to v4 |
 | `run_queries.py` | Python script that builds a fresh DB from schema + seed and runs all queries |
 
 ---
 
-## Schema Diagram (v3)
+## Changelog
+
+| Version | Date | Summary |
+|---------|------|---------|
+| **v4** | 2026-02-24 | Production-readiness fixes: WAL mode, 15 new indexes, CHECK constraints on 10 enum columns, NOT NULL+DEFAULT on 8 status/type columns, `deleted_at` soft-delete on 10 config tables, full v3 seed data coverage |
+| **v3** | 2026-02-23 | All 19 Hostaway data categories (Phase 1 complete): users, groups, units, reviews, coupons, custom fields, reference data, message templates, tasks, seasonal rules, taxes, guest charges, auto-charges, financial reports, owner statements, expenses, calendar, webhook configs |
+| **v2.1** | 2026-02-22 | `webhook_inbox` ingest pipeline for raw webhook payloads (OpenPhone + Hostaway) |
+| **v2** | 2026-02-22 | WhatsApp, `detected_triggers` (LLM event log), `outbound_notifications` (send audit), `hostaway_listings` snapshot, `openphone_phone_numbers`, voicemails, full call/SMS field set |
+| **v1** | 2026-02-21 | Initial schema: guests + properties (SCD Type 2), reservations, Hostaway conversations/messages, OpenPhone calls/transcripts/SMS, Gmail, Discord |
+
+### v4 Details (2026-02-24)
+
+**WAL mode** — `PRAGMA journal_mode = WAL` added to `schema.sql`. Enables concurrent reads during writes; critical for the webhook ingest loop running alongside LLM processing and outbound dispatch.
+
+**CHECK constraints** added to 10 enum columns that previously had only comments:
+
+| Table | Column | Values |
+|-------|--------|--------|
+| `hostaway_users` | `role` | `admin`, `owner`, `cleaner`, `maintenance`, `housekeeper`, `property_manager` |
+| `hostaway_tasks` | `task_type` | `cleaning`, `maintenance`, `inspection`, `other` |
+| `hostaway_tasks` | `status` | `pending`, `in_progress`, `completed`, `cancelled` |
+| `hostaway_custom_fields` | `field_type` | `text`, `number`, `date`, `boolean`, `select` |
+| `hostaway_message_templates` | `trigger` | `reservation_confirmed`, `checkin_day`, `checkout`, `guest_arrival`, `check_in_instructions`, `reminder`, `other` |
+| `hostaway_owner_statements` | `status` | `draft`, `sent`, `approved` |
+| `hostaway_auto_charges` | `trigger` | `on_booking`, `before_checkin`, `after_checkout`, `on_checkin`, `immediate` |
+| `hostaway_guest_charges` | `charge_type` | `damage_deposit`, `extra_guest`, `cleaning`, `other` |
+| `hostaway_expenses` | `category` | `maintenance`, `supplies`, `utilities`, `labor`, `marketing`, `other` |
+| `hostaway_tax_settings` | `applies_to` | `base_rate`, `total`, `cleaning_fee`, `nightly_rate` |
+
+**NOT NULL + DEFAULT** enforced on: `discount_type`, `is_required`, `task_type`, `status` (tasks/owner_statements/guest_charges), `category` (expenses), `voicemail_status`, `url` (webhook_configs).
+
+**Soft-delete fields** (`deleted_at DATETIME`) added to 10 configurable entity tables: `hostaway_users`, `hostaway_groups`, `hostaway_listing_units`, `hostaway_coupon_codes`, `hostaway_custom_fields`, `hostaway_message_templates`, `hostaway_seasonal_rules`, `hostaway_tax_settings`, `hostaway_auto_charges`, `hostaway_webhook_configs`. `is_active` also added to `hostaway_groups` and `hostaway_custom_fields`.
+
+**15 new indexes**: `openphone_phone_number_id` on calls + SMS, `assigned_user_id` on tasks, `reservation_id` + `category` on expenses, `hostaway_listing_id` on guest charges + coupons, `is_active` on groups/custom_fields/message_templates/seasonal_rules/tax_settings/auto_charges/webhook_configs.
+
+**Seed data** — all 19 v3 Hostaway tables now seeded (previously 0 rows each).
+
+**`migrate_v4.sql`** — applies all of the above to the live DB. v3 tables are all empty, so structural changes use DROP+CREATE. `openphone_voicemails` (v2 table with data) uses a rename dance to add NOT NULL DEFAULT safely.
+
+---
+
+## Schema Diagram (v4)
 
 ```
 DATA FLOW
@@ -268,7 +310,7 @@ DATA FLOW
 
 ## Mock Data Overview
 
-**v1/v2 tables** are fully seeded. **v3 Hostaway tables** (reviews, tasks, financials, calendar, etc.) are schema-complete but not yet seeded — queued for the next session.
+All 40 tables are seeded. Reference date: 2026-02-24.
 
 | Table | Rows | Notes |
 |-------|------|-------|
@@ -292,7 +334,25 @@ DATA FLOW
 | `detected_triggers` | 5 | 4 resolved · 1 open (Mountain Cabin A keypad battery) |
 | `outbound_notifications` | 7 | 5 Discord alerts + 2 WhatsApp auto-replies, all delivered |
 | `webhook_inbox` | 3 | 1 processed (Marcus SMS-013) · 1 unprocessed (Emily post-stay) · 1 failed (unknown number) |
-| v3 Hostaway tables (19) | 0 | Schema complete — seed data queued for next session |
+| `hostaway_users` | 3 | Noah (admin), Maria (housekeeper), Carlos (maintenance) |
+| `hostaway_groups` | 2 | Beach Portfolio · Mountain Portfolio |
+| `hostaway_group_listings` | 3 | HA-002 → Beach · HA-001 + HA-003 → Mountain |
+| `hostaway_listing_units` | 2 | Beach House 1: Main House + Guest Studio |
+| `hostaway_reviews` | 2 | 5-star (Marcus, Feb) + 4-star (David, Jan) for Beach House 1 |
+| `hostaway_coupon_codes` | 2 | WELCOME10 (10% off all) · BEACH50 ($50 off Beach House 1, summer) |
+| `hostaway_custom_fields` | 3 | Gate Code (listing) · Pet Deposit Paid (reservation) · Guest Source (guest) |
+| `hostaway_reference_data` | 12 | Amenities, bed types, property types, cancellation policies |
+| `hostaway_message_templates` | 3 | Booking confirmation · check-in instructions · checkout reminder |
+| `hostaway_tasks` | 3 | 1 completed (post-checkout clean) · 2 pending (keypad battery + pre-arrival inspection) |
+| `hostaway_seasonal_rules` | 3 | Summer premium (Beach) · Ski season peak (Mountain Cabin) · Holiday week (Cottage 3) |
+| `hostaway_tax_settings` | 3 | CA state TOT + local tourism assessment (account-level) · Malibu city TOT (Beach House 1) |
+| `hostaway_guest_charges` | 2 | Damage deposit voided (Marcus) · pet fee captured (Marcus) |
+| `hostaway_auto_charges` | 3 | 30% on booking + 70% 7 days before check-in (Beach House 1) · full on booking (Cabin) |
+| `hostaway_financial_reports` | 2 | Per-reservation income breakdown for R-1001 and R-1004 |
+| `hostaway_owner_statements` | 2 | Jan 2026 (sent) + Feb 2026 (draft) for Beach House 1 |
+| `hostaway_expenses` | 3 | Pool tech call-out · welcome kit restock · Starlink subscription |
+| `hostaway_calendar` | 15 | Cottage 3 availability Feb 28 – Mar 14 (R-1003 blocked Mar 5–9) |
+| `hostaway_webhook_configs` | 1 | MCP ingest endpoint for all Hostaway reservation + message events |
 
 ---
 
@@ -772,4 +832,9 @@ Built using **Claude Code** (Anthropic's CLI, powered by Claude Sonnet 4.6). Cla
 - Session 1: v1 schema design (SCD Type 2, cascading FKs, views), mock data, 6 initial queries, documentation
 - Session 2: v2 expansion — API field research, bidirectional schema (WhatsApp, trigger detection, outbound notifications, voicemails, listings), migration script, updated seed data, 4 new queries, README
 - Session 3: v2.1 — `webhook_inbox` table for OpenPhone SMS ingest pipeline (raw buffer → processing job → `openphone_sms_messages`), migration script, seed data, Q11, README
+<<<<<<< HEAD
 - Session 4: v3 — schema alignment with `hostaway-data-hub` (Phase 1 complete, all 19 Hostaway data categories). Added 19 new tables, `migrate_v3.sql`, production-readiness audit, README
+=======
+- Session 4: v3 — schema alignment with Jan Marc's `hostaway-data-hub` (Phase 1 complete, all 19 Hostaway data categories). Added 19 new tables, `migrate_v3.sql`, production-readiness audit, README
+- Session 5: v4 — production-readiness fixes. WAL mode, 15 new indexes, CHECK constraints on 10 enum columns, NOT NULL + DEFAULT on 8 status/type columns, `deleted_at` soft-delete on 10 config tables, `migrate_v4.sql`, full v3 seed data coverage (all 19 Hostaway tables seeded), README
+>>>>>>> a9a1dcd (implement v4)
