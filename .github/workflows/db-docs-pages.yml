@@ -1,0 +1,129 @@
+name: db-docs-pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "schema.sql"
+      - "seed_data.sql"
+      - "migrate*.sql"
+      - "property_data.db"
+      - ".github/workflows/db-docs-pages.yml"
+  workflow_dispatch:
+    inputs:
+      db_source:
+        description: "Where dev.db comes from"
+        required: true
+        type: choice
+        default: migrations
+        options:
+          - migrations
+          - committed_db
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build dev.db
+        shell: bash
+        env:
+          DB_SOURCE: ${{ github.event.inputs.db_source || 'migrations' }}
+        run: |
+          set -euo pipefail
+          rm -f dev.db
+          if [[ "${DB_SOURCE}" == "committed_db" ]]; then
+            cp property_data.db dev.db
+          else
+            sqlite3 dev.db < schema.sql
+            sqlite3 dev.db < seed_data.sql
+          fi
+
+      - name: Generate schema dump
+        run: |
+          mkdir -p site
+          sqlite3 dev.db ".schema" > site/schema.sql
+
+      - name: Generate ER diagram
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y graphviz libgraphviz-dev pkg-config python3-dev build-essential
+          python -m pip install --upgrade pip setuptools wheel
+          pip install eralchemy2
+          eralchemy2 -i sqlite:///dev.db -o site/erd.svg
+
+      - name: Build docs index
+        shell: bash
+        run: |
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Database Docs</title>
+            <style>
+              body {
+                font-family: Arial, sans-serif;
+                margin: 2rem;
+                max-width: 60rem;
+                line-height: 1.5;
+              }
+              h1 {
+                margin-bottom: 0.5rem;
+              }
+              ul {
+                padding-left: 1.25rem;
+              }
+            </style>
+          </head>
+          <body>
+            <h1>Database Documentation</h1>
+            <p>Generated from CI for commit: <code>${GITHUB_SHA}</code></p>
+            <ul>
+              <li><a href="schema.sql">Schema SQL dump</a></li>
+              <li><a href="erd.svg">ER diagram (SVG)</a></li>
+            </ul>
+          </body>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      pages: write
+      id-token: write
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
