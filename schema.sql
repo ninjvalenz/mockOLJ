@@ -1,6 +1,6 @@
 -- =============================================================================
 -- Centralized Property Management MCP Database
--- Schema v4: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
+-- Schema v5: Hostaway · OpenPhone (Quo) · Gmail · Discord · WhatsApp
 --            + LLM Trigger Detection · Outbound Notification Tracking
 --
 -- Data flows:
@@ -55,6 +55,19 @@
 --   · unified_communications view updated to include WhatsApp
 --   · open_triggers view (new)
 --   · notification_log view (new)
+--
+-- v5 additions (hostaway-data-hub pipeline alignment):
+--   · hostaway_listings: average_rating, currency, timezone, room_type,
+--                        property_type, images_json
+--   · hostaway_conversations: hostaway_listing_id, guest_name, last_message_at,
+--                             arrival_date, departure_date
+--   · hostaway_messages: status, is_incoming, sender_name
+--   · hostaway_calendar: max_nights, closed_on_arrival, closed_on_departure
+--   · hostaway_financial_reports: total_price, host_payout,
+--                                 host_channel_commission, payment_status
+--   · hostaway_reviews: channel_id, private_feedback, check_in_date,
+--                       check_out_date, rating
+--   · hostaway_webhook_configs: updated_at
 --
 -- v3 additions (Phase 1 complete — all 19 Hostaway data categories):
 --   · hostaway_users (team members — housekeepers, managers, etc.)
@@ -194,6 +207,13 @@ CREATE TABLE IF NOT EXISTS hostaway_listings (
     -- Amenities and bed types stored as JSON arrays (raw from API)
     amenities_json          TEXT,                            -- e.g. '["WiFi","Hot Tub","BBQ"]'
     bed_types_json          TEXT,
+    images_json             TEXT,                            -- v5: JSON array of {url, caption}
+    -- Ratings & classification (v5: from hostaway-data-hub pipeline)
+    average_rating          REAL,                            -- averageReviewRating
+    currency                TEXT,                            -- currencyCode (e.g. 'USD')
+    timezone                TEXT,                            -- timeZoneName (e.g. 'America/New_York')
+    room_type               TEXT,                            -- roomTypeId
+    property_type           TEXT,                            -- propertyTypeId
     -- Lifecycle
     is_archived             INTEGER  NOT NULL DEFAULT 0 CHECK(is_archived IN (0, 1)),
     last_synced_at          DATETIME,
@@ -266,9 +286,16 @@ CREATE TABLE IF NOT EXISTS hostaway_conversations (
                                     REFERENCES reservations(id)
                                     ON DELETE CASCADE
                                     ON UPDATE CASCADE,
+    hostaway_listing_id         TEXT                    -- v5: listing context
+                                    REFERENCES hostaway_listings(hostaway_listing_id)
+                                    ON DELETE SET NULL,
     participant_id              TEXT,                   -- v2: Hostaway participantId
     subject                     TEXT,                   -- v2: conversation subject
     channel                     TEXT,
+    guest_name                  TEXT,                   -- v5: PII-scrubbed
+    last_message_at             DATETIME,               -- v5: most recent message ts
+    arrival_date                DATE,                   -- v5: from conversation object
+    departure_date              DATE,                   -- v5: from conversation object
     created_at                  DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at                  DATETIME                -- v2: Hostaway updatedOn
 );
@@ -281,7 +308,10 @@ CREATE TABLE IF NOT EXISTS hostaway_messages (
                                 ON DELETE CASCADE
                                 ON UPDATE CASCADE,
     sender_type     TEXT     NOT NULL CHECK(sender_type IN ('host', 'guest', 'system')),
+    sender_name     TEXT,                               -- v5: raw senderName / communicationFrom (PII-scrubbed)
     body            TEXT     NOT NULL,
+    status          TEXT,                               -- v5: delivery status
+    is_incoming     INTEGER  CHECK(is_incoming IN (0, 1)),  -- v5: 1=guest→host, 0=host→guest
     sent_at         DATETIME NOT NULL,
     inserted_on     DATETIME,                           -- v2: Hostaway insertedOn
     updated_at      DATETIME                            -- v2: Hostaway updatedOn
@@ -302,11 +332,16 @@ CREATE TABLE IF NOT EXISTS hostaway_reviews (
     hostaway_listing_id     TEXT
                                 REFERENCES hostaway_listings(hostaway_listing_id)
                                 ON DELETE SET NULL,
-    overall_rating          REAL     CHECK(overall_rating BETWEEN 1 AND 5),
+    channel_id              TEXT,                        -- v5: booking channel (e.g. 'airbnb')
+    rating                  REAL     CHECK(rating BETWEEN 1 AND 5),          -- v5: raw API score
+    overall_rating          REAL     CHECK(overall_rating BETWEEN 1 AND 5),  -- computed average
     category_ratings_json   TEXT,    -- {"cleanliness": 5, "communication": 4, "location": 5, ...}
     review_content          TEXT,    -- guest review body
+    private_feedback        TEXT,    -- v5: host-only feedback, PII-scrubbed
     host_reply              TEXT,    -- host public response
     reviewer_name           TEXT,    -- PII-scrubbed (no raw names stored)
+    check_in_date           DATE,                        -- v5: arrivalDate from review record
+    check_out_date          DATE,                        -- v5: departureDate from review record
     submitted_at            DATETIME,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -675,6 +710,10 @@ CREATE TABLE IF NOT EXISTS hostaway_financial_reports (
     cleaning_fee            REAL,
     platform_commission     REAL,
     net_income              REAL,
+    total_price             REAL,                    -- v5: totalPrice (gross guest charge)
+    host_payout             REAL,                    -- v5: hostPayout (net remitted to host)
+    host_channel_commission REAL,                    -- v5: hostChannelCommission (OTA cut)
+    payment_status          TEXT,                    -- v5: e.g. 'paid', 'pending', 'partial'
     currency                TEXT     NOT NULL DEFAULT 'USD',
     report_date             DATE,
     created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -698,6 +737,9 @@ CREATE TABLE IF NOT EXISTS hostaway_calendar (
     is_available            INTEGER  NOT NULL DEFAULT 1 CHECK(is_available IN (0, 1)),
     price                   REAL,
     min_nights              INTEGER,
+    max_nights              INTEGER,                     -- v5: maximumStay per calendar day
+    closed_on_arrival       INTEGER  CHECK(closed_on_arrival IN (0, 1)),   -- v5
+    closed_on_departure     INTEGER  CHECK(closed_on_departure IN (0, 1)), -- v5
     notes                   TEXT,
     last_synced_at          DATETIME,
     UNIQUE (hostaway_listing_id, date)
@@ -737,7 +779,8 @@ CREATE TABLE IF NOT EXISTS hostaway_webhook_configs (
     events_json             TEXT,    -- JSON array of subscribed event types
     is_active               INTEGER  NOT NULL DEFAULT 1 CHECK(is_active IN (0, 1)),
     deleted_at              DATETIME,
-    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP
+    created_at              DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at              DATETIME                 -- v5: updatedOn from API
 );
 
 CREATE INDEX IF NOT EXISTS idx_webhook_configs_is_active ON hostaway_webhook_configs(is_active);
